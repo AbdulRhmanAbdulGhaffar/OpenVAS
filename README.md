@@ -123,7 +123,7 @@ To allow access from a **server IP (e.g. 192.168.x.x or public IP):**
    ```
    to:
    ```bash
-   ExecStart=/usr/local/sbin/gsad --foreground --listen=0.0.0.0 --port=443
+   ExecStart=/usr/local/sbin/gsad --foreground --listen=0.0.0.0 --port=9392
    ```
 
 3. Apply and restart the service:
@@ -135,7 +135,7 @@ To allow access from a **server IP (e.g. 192.168.x.x or public IP):**
 Now you can access OpenVAS from any browser using your server IP:
 
 ```
-https://<SERVER-IP>
+https://<SERVER-IP>:93992
 ```
 
 ---
