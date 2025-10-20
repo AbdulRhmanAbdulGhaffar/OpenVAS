@@ -1,179 +1,180 @@
 #!/usr/bin/env bash
-# -*- coding: utf-8 -*-
-# Install & configure Greenbone Community Edition (GVM / OpenVAS) on Kali Linux
-# Author: Generated for AbdulRhman AbdulGhaffar
-# Usage: sudo bash install_gvm.sh [--remote] [--port PORT] [--non-interactive]
-# Example: sudo bash install_gvm.sh --remote --port 443 --non-interactive
-set -euo pipefail
+# =============================================================================
+#  One-shot Fix & Autostart GVM/OpenVAS on Kali Linux
+#  - يثبت الحزم المطلوبة (gvm, greenbone-feed-sync, rsync, redis-server)
+#  - gvm-setup + إصلاح الشهادات TLS
+#  - تهيئة greenbone-feed-sync ليعمل كمستخدم _gvm
+#  - مزامنة كامل الـ feeds
+#  - Drop-ins لـ systemd + تمكين الخدمات على الإقلاع
+#  - فتح GSA على 0.0.0.0 تلقائيًا
+#  - إنشاء/تحديث admin + ضبط Feed Import Owner
+#  - فحص نهائي gvm-check-setup
+#  السجل: /var/log/gvm_fix.log | بيانات الدخول: /root/gvm-admin-credentials.txt
+# =============================================================================
+
+set -Eeuo pipefail
+trap 'echo "[!] خطأ عند السطر $LINENO"; exit 1' ERR
+
+LOGFILE="/var/log/gvm_fix.log"
+CRED_FILE="/root/gvm-admin-credentials.txt"
+ADMIN_USER="admin"
+GSA_LISTEN_ADDR="0.0.0.0"   # افتراضيًا يفتح الواجهة على كل العناوين
+
+mkdir -p "$(dirname "$LOGFILE")"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+echo "[+] بدء تجهيز GVM/OpenVAS @ $(date -Is)"
+
+[[ $EUID -eq 0 ]] || { echo "[!] لازم تشغّل السكريبت بـ root"; exit 1; }
+command -v systemctl >/dev/null || { echo "[!] systemctl مش موجود"; exit 1; }
+
+echo "[+] تحديث النظام وتثبيت الحزم المطلوبة..."
 export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y gvm greenbone-feed-sync rsync redis-server || true
 
-LOGFILE="/var/log/gvm_install.log"
-CRED_FILE="/root/gvm_admin_credentials.txt"
-GSAD_SERVICE="/usr/lib/systemd/system/gsad.service"  # location used in guide, may vary
-REMOTE_ACCESS=false
-REMOTE_PORT=9392
-NON_INTERACTIVE=false
+echo "[+] تشغيل gvm-setup (قد يستغرق وقتًا لأول مرة)..."
+# gvm-setup بيعمل DB/شهادات/أول مستخدم admin وبيظبط خدمات أساسية
+# لو هو متثبّت قبل كده، الأمر هيكمل بدون مشاكل
+gvm-setup || true
 
-# Helper: log
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"
-}
+echo "[+] إيقاف الخدمات مؤقتًا للتحضير..."
+systemctl stop gsad gvmd ospd-openvas notus-scanner 2>/dev/null || true
+systemctl stop postgresql 2>/dev/null || true
+systemctl stop redis-server 2>/dev/null || true
 
-# Parse args (simple)
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --remote) REMOTE_ACCESS=true; shift ;;
-    --port) REMOTE_PORT="$2"; shift 2 ;;
-    --non-interactive) NON_INTERACTIVE=true; shift ;;
-    -h|--help) echo "Usage: sudo bash install_gvm.sh [--remote] [--port PORT] [--non-interactive]"; exit 0 ;;
-    *) echo "Unknown arg: $1"; exit 1 ;;
-  esac
-done
+echo "[+] التأكد من PostgreSQL و Redis..."
+systemctl enable postgresql redis-server >/dev/null 2>&1 || true
+systemctl start postgresql
+systemctl start redis-server
 
-check_root() {
-  if [[ $(id -u) -ne 0 ]]; then
-    echo "Please run as root (sudo)." >&2
-    exit 1
-  fi
-}
+echo "[+] إصلاح/إنشاء شهادات TLS (آمن دومًا)..."
+runuser -u _gvm -- gvm-manage-certs -a -f || true
 
-safe_write_creds() {
-  local user=$1
-  local pass=$2
-  umask 177
-  cat > "$CRED_FILE" <<EOF
-GVM admin credentials (created on $(date -u +"%Y-%m-%d %H:%M:%S UTC"))
-
-Username: $user
-Password: $pass
-
-File location: $CRED_FILE
+echo "[+] تهيئة greenbone-feed-sync ليعمل كمستخدم _gvm (خاص بكالي)..."
+install -d -m 0755 /etc/gvm
+cat >/etc/gvm/greenbone-feed-sync.toml <<'EOF'
+[greenbone-feed-sync]
+user="_gvm"
+group="_gvm"
 EOF
-  chmod 600 "$CRED_FILE"
-  log "Admin credentials saved to $CRED_FILE (permissions 600)"
-}
+chmod 0644 /etc/gvm/greenbone-feed-sync.toml
 
-generate_password() {
-  # 16-char random password
-  tr -dc 'A-Za-z0-9!@%_-+=' < /dev/urandom | head -c 16 || echo "GvmPassw0rd!"
-}
+echo "[+] مزامنة الـ Greenbone Community Feed (كل الأنواع)... قد تستغرق دقائق/ساعات أول مرة"
+greenbone-feed-sync -vvv || echo "[!] تحذير: حدثت مشاكل أثناء المزامنة — راجع $LOGFILE"
 
-update_system() {
-  log "Updating APT and upgrading packages..."
-  apt update >> "$LOGFILE" 2>&1
-  apt -y upgrade >> "$LOGFILE" 2>&1 || log "Upgrade returned non-zero (check $LOGFILE)"
-}
+echo "[+] إضافة Drop-ins لـ systemd لضبط الاعتمادات وسياسة الإعادة..."
+# gvmd يعتمد على PostgreSQL والشبكة
+install -d -m 0755 /etc/systemd/system/gvmd.service.d
+cat >/etc/systemd/system/gvmd.service.d/override.conf <<'EOF'
+[Unit]
+After=postgresql.service network-online.target
+Wants=postgresql.service network-online.target
 
-install_gvm_package() {
-  log "Installing gvm package (OpenVAS/GVM)..."
-  apt -y install gvm >> "$LOGFILE" 2>&1
-}
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
 
-run_gvm_setup() {
-  log "Running gvm-setup (this may take several minutes). Output is logged to $LOGFILE"
-  if $NON_INTERACTIVE ; then
-    # Try to run with yes pipe; note gvm-setup may require TTY for some prompts
-    yes "" | gvm-setup >> "$LOGFILE" 2>&1 || log "gvm-setup exited with non-zero (check $LOGFILE)"
-  else
-    gvm-setup | tee -a "$LOGFILE"
-  fi
-  # Attempt to parse credentials from the log (common pattern)
-  if grep -q -i "Admin user created" "$LOGFILE" 2>/dev/null || grep -q -i "created user" "$LOGFILE" 2>/dev/null; then
-    # try to extract lines containing "user" and "password" near each other
-    creds=$(grep -iE "admin|user|password" "$LOGFILE" -n | tail -n 30 || true)
-    log "Attempting to extract admin credentials from gvm-setup output..."
-    echo "$creds" | tee -a "$LOGFILE"
-    # best-effort parse: look for "username" and "password" words
-    user=$(echo "$creds" | grep -iE "username|user" | head -n1 | awk -F: '{print $2}' | tr -d ' ' || true)
-    pass=$(echo "$creds" | grep -iE "password" | head -n1 | awk -F: '{print $2}' | tr -d ' ' || true)
-    if [[ -n "$user" && -n "$pass" ]]; then
-      safe_write_creds "$user" "$pass"
-      return 0
-    fi
-  fi
+# ospd-openvas يعتمد على redis + الشبكة
+install -d -m 0755 /etc/systemd/system/ospd-openvas.service.d
+cat >/etc/systemd/system/ospd-openvas.service.d/override.conf <<'EOF'
+[Unit]
+After=redis-server.service network-online.target
+Wants=redis-server.service network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# notus-scanner — إعادة تشغيل تلقائية عند الفشل
+install -d -m 0755 /etc/systemd/system/notus-scanner.service.d
+cat >/etc/systemd/system/notus-scanner.service.d/override.conf <<'EOF'
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
+
+# gsad: فتح الواجهة على كل العناوين 0.0.0.0
+GSAD_BIN="$(command -v gsad || echo /usr/sbin/gsad)"
+install -d -m 0755 /etc/systemd/system/gsad.service.d
+cat >/etc/systemd/system/gsad.service.d/override.conf <<EOF
+[Unit]
+After=gvmd.service network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=
+ExecStart=${GSAD_BIN} --foreground --listen=${GSA_LISTEN_ADDR} --port=9392
+Restart=on-failure
+RestartSec=5s
+EOF
+
+echo "[+] إعادة تحميل وحدات systemd..."
+systemctl daemon-reload
+
+echo "[+] تمكين الخدمات على الإقلاع (Autostart)..."
+systemctl enable postgresql redis-server gvmd gsad ospd-openvas notus-scanner >/dev/null 2>&1 || true
+
+echo "[+] بدء الخدمات بالترتيب..."
+systemctl start gvmd
+sleep 3
+systemctl start ospd-openvas
+sleep 2
+systemctl start notus-scanner || true
+sleep 2
+systemctl start gsad
+
+# انتظار الجاهزية
+wait_active() {
+  local svc="$1" tries=90
+  while (( tries-- > 0 )); do
+    systemctl is-active --quiet "$svc" && return 0
+    sleep 1
+  done
   return 1
 }
+for s in gvmd ospd-openvas gsad; do
+  echo "[i] انتظار جاهزية: $s"
+  wait_active "$s" || echo "[!] تحذير: $s لم يصل لحالة active - افحص: systemctl status $s"
+done
 
-ensure_admin_user() {
-  # If we couldn't grab credentials, create a new admin user for GVM
-  local user_check
-  user_check=$(runuser -u _gvm -- gvmd --get-users 2>/dev/null || true)
-  if echo "$user_check" | grep -q -i "admin"; then
-    log "Admin user already exists. Listing users:"
-    echo "$user_check" | tee -a "$LOGFILE"
-    return 0
-  fi
-  NEW_ADMIN="admin"
-  NEW_PASS=$(generate_password)
-  log "Creating admin user '$NEW_ADMIN' with a generated password."
-  runuser -u _gvm -- gvmd --create-user="$NEW_ADMIN" --password="$NEW_PASS" >> "$LOGFILE" 2>&1
-  safe_write_creds "$NEW_ADMIN" "$NEW_PASS"
-}
+echo "[+] ترحيل قاعدة بيانات gvmd (لو لزم)..."
+runuser -u _gvm -- gvmd --migrate || true
 
-sync_feeds() {
-  log "Syncing Greenbone feeds (this can take a long time depending on network & CPU)"
-  greenbone-feed-sync --type GVMD_DATA >> "$LOGFILE" 2>&1 || log "GVMD_DATA sync failed"
-  greenbone-feed-sync --type SCAP >> "$LOGFILE" 2>&1 || log "SCAP sync failed"
-  greenbone-feed-sync --type CERT >> "$LOGFILE" 2>&1 || log "CERT sync failed"
-  log "Feed sync commands finished. Check $LOGFILE for details."
-}
+echo "[+] إنشاء/تحديث مستخدم الأدمن وإعداد كلمة سر قوية..."
+ADMIN_PW="$(tr -dc 'A-Za-z0-9!@#%^_-+=' </dev/urandom | head -c 24)"
+if runuser -u _gvm -- gvmd --get-users | grep -q "^${ADMIN_USER}\b"; then
+  runuser -u _gvm -- gvmd --user="${ADMIN_USER}" --new-password="${ADMIN_PW}"
+else
+  runuser -u _gvm -- gvmd --create-user="${ADMIN_USER}" --password="${ADMIN_PW}"
+fi
 
-configure_gsad_remote() {
-  if [[ ! -f "$GSAD_SERVICE" ]]; then
-    log "Warning: gsad service file not found at $GSAD_SERVICE. Trying common alternative locations..."
-    if [[ -f "/lib/systemd/system/gsad.service" ]]; then
-      GSAD_SERVICE="/lib/systemd/system/gsad.service"
-    elif [[ -f "/etc/systemd/system/gsad.service" ]]; then
-      GSAD_SERVICE="/etc/systemd/system/gsad.service"
-    else
-      log "gsad.service location not found. Skipping automatic remote configure. You can edit the service file manually."
-      return 1
-    fi
-  fi
-  log "Backing up original gsad.service to ${GSAD_SERVICE}.bak"
-  cp "$GSAD_SERVICE" "${GSAD_SERVICE}.bak"
-  log "Modifying gsad ExecStart to listen on 0.0.0.0 port ${REMOTE_PORT}"
-  # Replace listen argument while preserving other flags
-  sed -i -E "s@(ExecStart=.*--listen=)[^ ]+@\\10.0.0.0@" "$GSAD_SERVICE" || true
-  # Change port value if present; otherwise append --port
-  if grep -q -- "--port=" "$GSAD_SERVICE"; then
-    sed -i -E "s@(--port=)[0-9]+@\\1${REMOTE_PORT}@" "$GSAD_SERVICE" || true
-  else
-    # append port to ExecStart line
-    sed -i -E "s@(ExecStart=.*)@\\1 --port=${REMOTE_PORT}@" "$GSAD_SERVICE" || true
-  fi
-  systemctl daemon-reload
-  systemctl restart gsad || log "Failed to restart gsad; check $LOGFILE and 'journalctl -u gsad -b'"
-  log "gsad service modified and restarted (if restart succeeded)."
-}
+echo "[+] ضبط Feed Import Owner للمستخدم ${ADMIN_USER}..."
+ADMIN_UUID="$(runuser -u _gvm -- gvmd --get-users --verbose | awk -v u="${ADMIN_USER}" '$1==u{print $2; exit}')"
+if [[ -n "$ADMIN_UUID" ]]; then
+  runuser -u _gvm -- gvmd --modify-setting 78eceaec-3385-11ea-b237-28d24461215b --value "${ADMIN_UUID}" || true
+else
+  echo "[!] تعذر الحصول على UUID للأدمن — تخطيت خطوة Feed Import Owner"
+fi
 
-final_checks() {
-  log "Running gvm-check-setup to verify installation; output appended to $LOGFILE"
-  gvm-check-setup >> "$LOGFILE" 2>&1 || log "gvm-check-setup returned non-zero; inspect $LOGFILE"
-  log "Installation script finished. Admin credentials (if created) are in $CRED_FILE"
-  log "Tip: Open the web UI at https://<SERVER-IP>:${REMOTE_PORT} (or https://127.0.0.1:${REMOTE_PORT} if local)"
-}
+echo "[+] حفظ بيانات الدخول بشكل آمن..."
+{
+  echo "username=${ADMIN_USER}"
+  echo "password=${ADMIN_PW}"
+} > "$CRED_FILE"
+chmod 600 "$CRED_FILE"
 
-main() {
-  check_root
-  log "Start GVM install script"
-  update_system
-  install_gvm_package
+echo "[+] فحص gvm-check-setup النهائي (قد يظهر تنبيهات معلوماتية)..."
+gvm-check-setup || true
 
-  if run_gvm_setup ; then
-    log "gvm-setup appears to have produced credentials (saved)."
-  else
-    log "gvm-setup did not yield parseable credentials. Will ensure admin user exists."
-    ensure_admin_user
-  fi
-
-  sync_feeds
-
-  if $REMOTE_ACCESS ; then
-    configure_gsad_remote || log "configure_gsad_remote failed or was skipped"
-  fi
-
-  final_checks
-}
-
-main "$@"
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+echo
+echo "[✓] تم — كل شيء جاهز!"
+echo "    🌐 واجهة الويب: https://${IP:-<Your-IP>}:9392"
+echo "    👤 المستخدم: ${ADMIN_USER}"
+echo "    🔑 كلمة السر: (موجودة في ${CRED_FILE})"
+echo "    🧾 السجل: ${LOGFILE}"
+echo
+echo "[ℹ] ملاحظة: تحميل/فهرسة الـ feeds قد يحتاج شوية وقت بعد أول تشغيل — ده طبيعي."
