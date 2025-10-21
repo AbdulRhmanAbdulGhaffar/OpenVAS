@@ -16,7 +16,16 @@
 | **OS** | Kali Linux (Rolling Release) | Latest Updated Version |
 
 ---
+## ⚡ QuickStart — One-line installer
 
+Run the full installer with one command (after you upload this repository to GitHub):
+
+```bash
+sudo curl -sSL https://raw.githubusercontent.com/AbdulRhmanAbdulGhaffar/OpenVAS/main/install_openvas.sh | sudo bash
+```
+---
+# OR
+---
 ## ⚙️ Step 1: Update Kali Linux
 
 Before installation, update and upgrade all packages to ensure system compatibility.
