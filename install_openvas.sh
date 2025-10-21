@@ -1,107 +1,195 @@
 #!/bin/bash
 
-# GVM (Greenbone Vulnerability Manager) Professional Installer for Kali Linux
-# This script automates the installation and configuration process.
+# =============================================================================
+# Greenbone Community Edition (GVM) Professional Installation Script for Kali Linux
 #
-# What it does:
-# 1. Checks for root privileges.
-# 2. Updates and upgrades the system.
-# 3. Installs the GVM package.
-# 4. Runs the initial gvm-setup.
-# 5. Configures the web interface (GSA) to be accessible from any IP address.
-# 6. Sets the admin user's password to 'admin'.
-# 7. Enables GVM services to start automatically on boot.
-# 8. Verifies the installation.
+# Description: This script automates the installation and configuration of GVM 
+#              on Kali Linux based on the official documentation, with the 
+#              following custom configurations:
+#              1. Enables remote access to the web UI (from any IP).
+#              2. Sets static credentials (admin/admin).
+#              3. Enables GVM services to start automatically on boot.
+#              4. Opens the default port (9392) in the UFW firewall.
+#
+# Author: Gemini
+# Version: 2.1 (Added timeout override and DB migration)
+# =============================================================================
 
-# --- Color Codes for Output ---
+# --- Color Definitions ---
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# --- Step 1: Check for Root Privileges ---
-echo -e "${GREEN}[*] Checking for root privileges...${NC}"
-if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}[!] Error: This script must be run as root. Please use 'sudo ./install_gvm.sh'.${NC}"
-  exit 1
-fi
-echo -e "${GREEN}[+] Privileges check passed.${NC}\n"
+# --- Main Function ---
+main() {
+    check_root
+    prepare_system
+    install_gvm
+    configure_gvm
+    configure_remote_access
+    increase_service_timeout
+    enable_and_restart_services
+    set_static_credentials
+    configure_firewall
+    final_summary
+}
 
-# --- Step 2: Update System ---
-echo -e "${GREEN}[*] Updating package lists and performing a full system upgrade...${NC}"
-apt update && apt full-upgrade -y
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Error: Failed to update the system. Please check your network connection and repositories.${NC}"
-    exit 1
-fi
-echo -e "${GREEN}[+] System updated successfully.${NC}\n"
+# --- Check for Root Privileges ---
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}Error: This script must be run as root.${NC}"
+        echo -e "${YELLOW}Please use: sudo ./install_gvm.sh${NC}"
+        exit 1
+    fi
+    # Exit immediately if a command exits with a non-zero status.
+    set -e
+}
 
-# --- Step 3: Install GVM ---
-echo -e "${GREEN}[*] Installing Greenbone Vulnerability Manager (gvm)...${NC}"
-apt install gvm -y
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Error: Failed to install GVM package.${NC}"
-    exit 1
-fi
-echo -e "${GREEN}[+] GVM package installed successfully.${NC}\n"
+# --- Prepare System ---
+prepare_system() {
+    echo -e "${GREEN}==> [Step 1/9] Performing a full system upgrade...${NC}"
+    echo -e "${YELLOW}This process may take a while.${NC}"
+    apt update
+    apt full-upgrade -y
+    echo -e "${GREEN}System updated successfully.${NC}"
+}
 
-# --- Step 4: Initial GVM Setup ---
-echo -e "${YELLOW}[*] Running initial GVM setup. This process will take a considerable amount of time to sync the feeds...${NC}"
-gvm-setup
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Error: gvm-setup failed. Please check the output for errors.${NC}"
-    exit 1
-fi
-echo -e "${GREEN}[+] Initial GVM setup completed.${NC}\n"
+# --- Install GVM ---
+install_gvm() {
+    echo -e "\n${GREEN}==> [Step 2/9] Installing GVM packages...${NC}"
+    apt install gvm -y
+    echo -e "${GREEN}GVM installed successfully.${NC}"
+}
 
-# --- Step 5: Configure Remote Access ---
-GSA_SERVICE_FILE="/usr/lib/systemd/system/gsad.service"
-echo -e "${GREEN}[*] Configuring Greenbone Security Assistant (GSA) for remote access...${NC}"
-if [ -f "$GSA_SERVICE_FILE" ]; then
-    sed -i 's/--listen=127.0.0.1/--listen=0.0.0.0/' "$GSA_SERVICE_FILE"
-    echo -e "${GREEN}[+] GSA configured to listen on all interfaces (0.0.0.0).${NC}\n"
-else
-    echo -e "${RED}[!] Error: GSA service file not found at $GSA_SERVICE_FILE. Cannot configure remote access.${NC}"
-fi
+# --- Initial GVM Configuration ---
+configure_gvm() {
+    echo -e "\n${GREEN}==> [Step 3/9] Running initial GVM setup...${NC}"
+    echo -e "${YELLOW}This process syncs the feeds and can take a very long time. Please be patient.${NC}"
+    gvm-setup
+    echo -e "${GREEN}Initial setup completed.${NC}"
+}
 
-# --- Step 6: Set Admin Password ---
-echo -e "${YELLOW}[*] Setting the 'admin' user password to 'admin'...${NC}"
-# The command must be run as the _gvm user to have permissions
-sudo -u _gvm gvmd --user=admin --new-password=admin
-if [ $? -ne 0 ]; then
-    echo -e "${RED}[!] Error: Failed to set the admin password. The user may not exist yet.${NC}"
-    echo -e "${YELLOW}[*] Note: The password can be set manually later.${NC}"
-fi
-echo -e "${GREEN}[+] Admin password has been set.${NC}\n"
+# --- Configure Remote Access ---
+configure_remote_access() {
+    echo -e "\n${GREEN}==> [Step 4/9] Configuring remote access...${NC}"
+    local gsad_service_file="/usr/lib/systemd/system/gsad.service"
+    if [ -f "$gsad_service_file" ]; then
+        # Change listen address from localhost to any
+        sed -i 's/--listen=127.0.0.1/--listen=0.0.0.0/' "$gsad_service_file"
+        echo -e "${GREEN}gsad service file modified successfully.${NC}"
+    else
+        echo -e "${RED}Error: gsad.service file not found!${NC}"
+        exit 1
+    fi
+}
 
-# --- Step 7: Enable and Start Services on Boot ---
-echo -e "${GREEN}[*] Reloading systemd, enabling and starting GVM services...${NC}"
-systemctl daemon-reload
-systemctl enable gvmd ospd-openvas gsad
-systemctl restart gvmd ospd-openvas gsad
-echo -e "${GREEN}[+] GVM services have been enabled and started.${NC}\n"
+# --- Increase GVMD Service Timeout ---
+increase_service_timeout() {
+    echo -e "\n${GREEN}==> [Step 5/9] Increasing gvmd service startup timeout...${NC}"
+    local override_dir="/etc/systemd/system/gvmd.service.d"
+    mkdir -p "$override_dir"
+    cat > "${override_dir}/override.conf" << EOF
+[Service]
+# Allow gvmd more time to start, especially on slower systems or first run
+TimeoutStartSec=600
+EOF
+    echo -e "${GREEN}Timeout increased to 10 minutes.${NC}"
+}
 
-# --- Step 8: Verify Installation ---
-echo -e "${YELLOW}[*] Running gvm-check-setup to verify the installation. Please review the output carefully.${NC}"
-gvm-check-setup
-echo -e "${GREEN}[+] Verification script finished.${NC}\n"
 
-# --- Final Instructions ---
-IP_ADDR=$(hostname -I | awk '{print $1}')
-echo -e "${GREEN}====================================================${NC}"
-echo -e "${GREEN}      GVM Installation & Configuration Complete!      ${NC}"
-echo -e "${GREEN}====================================================${NC}"
-echo -e "\n"
-echo -e "You can now access the Greenbone web interface at:"
-echo -e "URL:      ${YELLOW}https://${IP_ADDR}:9392${NC}"
-echo -e "\n"
-echo -e "Credentials:"
-echo -e "Username: ${YELLOW}admin${NC}"
-echo -e "Password: ${YELLOW}admin${NC}"
-echo -e "\n"
-echo -e "${RED}[!] SECURITY WARNING:${NC}"
-echo -e "${YELLOW}The password 'admin' is highly insecure. It is STRONGLY recommended to change it immediately after your first login for security purposes.${NC}"
-echo -e "\n"
-echo -e "It may take some time for the feeds to fully sync. You can check the status in the web UI under 'Administration' -> 'Feed Status'."
-echo -e "If you encounter issues, run 'sudo gvm-check-setup' again for diagnostics."
-echo -e "\n"
+# --- Enable and Restart Services (Robust Method) ---
+enable_and_restart_services() {
+    echo -e "\n${GREEN}==> [Step 6/9] Enabling services for autostart...${NC}"
+    systemctl daemon-reload # Reload after creating timeout override
+    systemctl enable gsad.service gvmd.service ospd-openvas.service notus-scanner.service
+    echo -e "${GREEN}Services enabled successfully.${NC}"
+
+    echo -e "\n${GREEN}==> [Step 7/9] Migrating database and restarting services...${NC}"
+    
+    # Stop all services to ensure a clean start
+    echo -e "${YELLOW}Stopping all GVM services...${NC}"
+    systemctl stop gsad.service || true
+    systemctl stop gvmd.service || true
+    systemctl stop ospd-openvas.service || true
+    systemctl stop notus-scanner.service || true
+
+    # Run DB migration as a critical pre-start step
+    echo -e "${GREEN}Running GVM database migration...${NC}"
+    runuser -u _gvm -- gvmd --migrate || { echo -e "${RED}GVMD database migration failed!${NC}"; exit 1; }
+    echo -e "${GREEN}Database migration successful.${NC}"
+
+    # Start services in order
+    echo -e "${GREEN}Starting scanner services (ospd-openvas, notus-scanner)...${NC}"
+    systemctl start ospd-openvas.service
+    systemctl start notus-scanner.service
+
+    echo -e "${GREEN}Starting Greenbone Vulnerability Manager (gvmd)...${NC}"
+    systemctl start gvmd.service
+
+    # Wait for gvmd to be fully ready by polling it
+    echo -e "${YELLOW}Waiting for GVMD to become responsive... (This may take a couple of minutes)${NC}"
+    local counter=0
+    local max_wait=600 # 10 minutes timeout to match systemd
+    while ! runuser -u _gvm -- gvmd --get-users &>/dev/null; do
+        sleep 2
+        counter=$((counter+2))
+        if [ $counter -ge $max_wait ]; then
+            echo -e "\n${RED}Error: GVMD failed to start within the timeout period.${NC}"
+            echo -e "${RED}Please run 'journalctl -xeu gvmd.service' for diagnostics.${NC}"
+            exit 1
+        fi
+        echo -n "."
+    done
+    echo -e "\n${GREEN}GVMD is ready.${NC}"
+
+    echo -e "${GREEN}Starting Greenbone Security Assistant (gsad)...${NC}"
+    systemctl start gsad.service
+
+    echo -e "${GREEN}All GVM services have been restarted successfully.${NC}"
+}
+
+# --- Set Static Password for Admin User ---
+set_static_credentials() {
+    echo -e "\n${GREEN}==> [Step 8/9] Setting a static password for the 'admin' user...${NC}"
+    # This is run after services have been restarted to ensure gvmd is responsive.
+    runuser -u _gvm -- gvmd --user=admin --new-password=admin
+    echo -e "${GREEN}Password successfully set to 'admin'.${NC}"
+}
+
+# --- Configure Firewall ---
+configure_firewall() {
+    echo -e "\n${GREEN}==> [Step 9/9] Configuring the firewall (UFW)...${NC}"
+    # Install UFW if it's not already installed
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}UFW is not installed. Installing...${NC}"
+        apt install ufw -y
+    fi
+    ufw allow 9392/tcp
+    # Enable UFW and assume yes to the prompt
+    echo "y" | ufw enable
+    ufw status
+    echo -e "${GREEN}Firewall configured to allow traffic on port 9392.${NC}"
+}
+
+# --- Final Summary ---
+final_summary() {
+    IP_ADDRESS=$(hostname -I | awk '{print $1}')
+    echo -e "\n\n${GREEN}=====================================================================${NC}"
+    echo -e "${GREEN}     🎉 GVM Installation and Setup Completed Successfully! 🎉          ${NC}"
+    echo -e "${GREEN}=====================================================================${NC}"
+    echo -e "\nYou can now access the Greenbone web interface:"
+    echo -e "${YELLOW}Access URL: https://${IP_ADDRESS}:9392${NC}"
+    echo -e "\nLogin Credentials:"
+    echo -e "${YELLOW}Username: admin${NC}"
+    echo -e "${YELLOW}Password: admin${NC}"
+    echo -e "\n${RED}Important Note:${NC} After logging in for the first time, you may need to wait for"
+    echo -e "the feeds to finish syncing and updating."
+    echo -e "You can check the status on the 'Feed Status' page in the web UI."
+    echo -e "\nTo check the installation status manually, you can run the following command:"
+    echo -e "${YELLOW}sudo gvm-check-setup${NC}\n"
+}
+
+# --- Start Script Execution ---
+main
+
