@@ -12,7 +12,7 @@
 #              4. Opens the default port (9392) in the UFW firewall.
 #
 # Author: Gemini
-# Version: 2.2 (Added robust PostgreSQL pre-start)
+# Version: 2.3 (Explicit PostgreSQL version install)
 # =============================================================================
 
 # --- Color Definitions ---
@@ -58,9 +58,10 @@ prepare_system() {
 
 # --- Install GVM ---
 install_gvm() {
-    echo -e "\n${GREEN}==> [Step 2/10] Installing GVM packages...${NC}"
-    # Installing postgresql explicitly to ensure it's managed first
-    apt install gvm postgresql -y
+    echo -e "\n${GREEN}==> [Step 2/10] Installing GVM and PostgreSQL packages...${NC}"
+    # Explicitly install the specific PostgreSQL version and common files
+    # to prevent issues with missing binaries like 'initdb'.
+    apt install gvm postgresql-16 postgresql-client-16 postgresql-common -y
     echo -e "${GREEN}GVM and PostgreSQL packages installed successfully.${NC}"
 }
 
