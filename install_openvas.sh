@@ -1,156 +1,234 @@
 #!/bin/bash
 # ============================================================
 # OpenVAS (Greenbone Community Edition) Automated Installer
-# For Kali Linux
-# Author: AbdulRhman AbdulGhaffar (adapted)
-# Purpose: Install, configure, enable services on boot, and display access info
-# Usage: sudo bash install_openvas.sh
+# All-in-one: install, setup, enable remote access, feed sync, set admin password
+# Author: adapted for you
+# Usage: sudo bash install_openvas_complete.sh
 # ============================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-LOG="/tmp/gvm_install_$(date +%Y%m%d_%H%M%S).log"
-SETUP_OUT="/tmp/gvm_setup_output.log"
-
-echo "============================================================"
-echo "   🟢 Starting Greenbone Community Edition (OpenVAS) Setup"
-echo "   Log: $LOG"
-echo "============================================================"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+LOG="/tmp/gvm_install_${TIMESTAMP}.log"
+SETUP_OUT="/tmp/gvm_setup_output_${TIMESTAMP}.log"
+SUMMARY="/root/openvas_install_summary_${TIMESTAMP}.txt"
 
 exec > >(tee -a "$LOG") 2>&1
 
-function abort {
-  echo
-  echo "❌ Installer aborted due to an error. Check the log: $LOG"
-  exit 1
-}
-trap abort ERR
+echo "============================================================"
+echo " OpenVAS (Greenbone CE) automatic installer"
+echo " Log: $LOG"
+echo " Setup capture: $SETUP_OUT"
+echo " Summary will be written to: $SUMMARY"
+echo "============================================================"
+
+trap 'echo "ERROR: Installer failed. See $LOG"; exit 1' ERR
+
+# Helper: print step header
+step() { echo; echo "---- $1"; echo; }
 
 # 1) Update & upgrade system
-echo "[1/8] Updating and upgrading system..."
+step "1) Update & upgrade system"
 apt update -y && apt full-upgrade -y
 apt autoremove -y
-echo "✅ System packages updated."
 
-# 2) Install gvm (OpenVAS)
-echo "[2/8] Installing gvm package..."
+# 2) Install gvm
+step "2) Install gvm (Greenbone Community Edition)"
 apt install -y gvm
-echo "✅ gvm package installed."
 
-# 3) Run gvm-setup and capture output
-echo "[3/8] Running gvm-setup (this may take several minutes)..."
-# run and capture both stdout and stderr to SETUP_OUT
+# 3) Run gvm-setup (capture output)
+step "3) Running gvm-setup (this may take several minutes; output captured)"
+# sometimes gvm-setup prompts or prints; capture all output
 if sudo gvm-setup 2>&1 | tee "$SETUP_OUT"; then
-    echo "✅ gvm-setup finished."
+  echo "gvm-setup completed (exit 0)."
 else
-    echo "⚠️ gvm-setup returned non-zero exit code. Check $SETUP_OUT and $LOG"
+  echo "gvm-setup returned non-zero exit code — continuing to try to fix common issues."
 fi
 
-# 4) Try to extract admin password from setup output (multiple common patterns)
-echo "[4/8] Extracting admin password from setup output..."
+# 4) Try to locate admin password inside setup output or logs; generate and set if not found
+step "4) Determine or set admin password"
 ADMIN_PASS=""
-
-# Common patterns to search (case-insensitive)
-# Examples: "admin password: <pw>" or "Password for user 'admin': <pw>" or "generated password for admin: <pw>"
-ADMIN_PASS=$(grep -iE "admin( user)? (password|pwd)|password for user 'admin'|generated password for admin" "$SETUP_OUT" -m 1 -n || true)
-if [ -n "$ADMIN_PASS" ]; then
-    # extract last token (works in most cases)
-    ADMIN_PASS=$(echo "$ADMIN_PASS" | sed -E 's/.*[:=]-?[[:space:]]*//I' | awk '{print $NF}')
-fi
-
-# If previous failed, try more heuristics: look for "admin" near a word that looks like a password
-if [ -z "$ADMIN_PASS" ]; then
-    # search lines that mention admin and a word of length >=6 <=60 (simple heuristic)
-    ADMIN_PASS=$(grep -i "admin" "$SETUP_OUT" | grep -oE "[A-Za-z0-9@#%_\-]{6,60}" | head -n1 || true)
-fi
-
-if [ -n "$ADMIN_PASS" ]; then
-    echo "✅ Admin password detected."
-else
-    echo "⚠️ Admin password NOT detected automatically. Please inspect: $SETUP_OUT"
-fi
-
-# 5) Verify installation
-echo "[5/8] Verifying installation with gvm-check-setup..."
-# run the checker (it may print guidance); don't fail the whole script on warnings
-if sudo gvm-check-setup; then
-    echo "✅ gvm-check-setup reports OK."
-else
-    echo "⚠️ gvm-check-setup reported issues. Review the output above and $LOG"
-fi
-
-# 6) Enable remote access (listen on 0.0.0.0) but keep port 9392
-echo "[6/8] Enabling remote access (listen=0.0.0.0) while keeping port 9392..."
-GSAD_SERVICE_FILE="/usr/lib/systemd/system/gsad.service"
-if [ -f "$GSAD_SERVICE_FILE" ]; then
-    sudo cp "$GSAD_SERVICE_FILE" "${GSAD_SERVICE_FILE}.bak"
-    sudo sed -i 's/--listen=127.0.0.1/--listen=0.0.0.0/g' "$GSAD_SERVICE_FILE" || true
-    echo "✅ gsad.service updated and backup saved as ${GSAD_SERVICE_FILE}.bak"
-else
-    echo "⚠️ gsad.service not found at $GSAD_SERVICE_FILE — skipping automatic edit."
-fi
-
-# Reload systemd and restart gsad if present
-echo "[7/8] Reloading systemd and restarting services..."
-sudo systemctl daemon-reload || true
-# restart gsad if exists
-if systemctl list-unit-files | grep -q '^gsad'; then
-    sudo systemctl restart gsad || echo "⚠️ Failed to restart gsad (check service name)."
-fi
-
-# Ensure key GVM services are enabled to start at boot if available:
-SERVICES_TO_ENABLE=(gsad gvmd ospd-openvas)
-for svc in "${SERVICES_TO_ENABLE[@]}"; do
-    if systemctl list-unit-files | grep -q "^${svc}"; then
-        echo "Enabling $svc to start on boot..."
-        sudo systemctl enable "$svc" || echo "⚠️ Failed to enable $svc"
-    else
-        echo "Note: $svc service not present (skipping enable)."
+# Try multiple common patterns in setup capture & expected logs
+for f in "$SETUP_OUT" /var/log/gvm/setup.log /var/log/openvas/setup.log /var/log/gvm/gvmd.log; do
+  if [ -f "$f" ]; then
+    candidate=$(grep -iE "admin( user)? (password|pwd)|password for user 'admin'|generated.*password.*admin" "$f" -m1 || true)
+    if [ -n "$candidate" ]; then
+      # extract last token after colon/equals
+      token=$(echo "$candidate" | sed -E 's/.*[:=]-?[[:space:]]*//I' | awk '{print $NF}')
+      if [ -n "$token" ]; then
+        ADMIN_PASS="$token"
+        break
+      fi
     fi
+  fi
 done
 
-# 8) Start all GVM services (gvm-start); tolerate non-fatal failures
-echo "[8/8] Starting all Greenbone services..."
-if sudo gvm-start; then
-    echo "✅ gvm-start succeeded. Services should be running."
+# If no pass found, create a strong random password and set it in gvmd
+if [ -z "${ADMIN_PASS:-}" ]; then
+  echo "No admin password found in logs; creating a strong password and applying it to the manager."
+  ADMIN_PASS="$(tr -dc 'A-Za-z0-9@%_-' </dev/urandom | head -c 20)"
+  # ensure gvmd user exists and set password
+  if sudo runuser -u _gvm -- gvmd --get-users >/dev/null 2>&1; then
+    echo "Setting admin password in gvmd to the generated value."
+    sudo runuser -u _gvm -- gvmd --user=admin --new-password="${ADMIN_PASS}" || {
+      echo "gvmd password set failed — trying to create admin user then set password"
+      sudo runuser -u _gvm -- gvmd --create-user=admin --password="${ADMIN_PASS}" || true
+    }
+  else
+    echo "Warning: gvmd command not available or _gvm user not ready; admin password will need manual reset later."
+  fi
 else
-    echo "⚠️ gvm-start returned non-zero. Check service status and $LOG"
+  echo "Found admin password: (hidden) — applying to gvmd to ensure sync."
+  # attempt to apply it to be sure
+  sudo runuser -u _gvm -- gvmd --user=admin --new-password="${ADMIN_PASS}" >/dev/null 2>&1 || true
 fi
 
-# Final: determine server IP to display
+# 5) Ensure gsad listens on 0.0.0.0:9392 (safe edit)
+step "5) Configure gsad service to listen on 0.0.0.0:9392"
+GSAD_UNIT_CANDIDATES=(
+  "/usr/lib/systemd/system/gsad.service"
+  "/lib/systemd/system/gsad.service"
+  "/etc/systemd/system/gsad.service"
+)
+GSAD_UNIT=""
+for p in "${GSAD_UNIT_CANDIDATES[@]}"; do
+  if [ -f "$p" ]; then
+    GSAD_UNIT="$p"
+    break
+  fi
+done
+
+if [ -n "$GSAD_UNIT" ]; then
+  echo "Found gsad unit: $GSAD_UNIT"
+  sudo cp "$GSAD_UNIT" "${GSAD_UNIT}.bak_${TIMESTAMP}"
+  # Try to find ExecStart line and adjust listen arg. Also handle cases where ExecStart contains full path to gsad
+  sudo sed -i -E "s/--listen=127(\\.0\\.0\\.1)?/--listen=0.0.0.0/g" "$GSAD_UNIT" || true
+  # keep port 9392 (do not force 443)
+  sudo systemctl daemon-reload
+  sudo systemctl restart gsad || echo "Warning: restart of gsad failed; check 'systemctl status gsad'"
+  echo "Edited and restarted gsad (backup saved)."
+else
+  echo "gsad systemd unit not found in expected locations. Skipping automatic edit — you may need to update the service manually."
+fi
+
+# 6) Enable services to start at boot if present
+step "6) Enable GVM services to start on boot (if available)"
+SERVICES=(gsad gvmd ospd-openvas ospd-openvas.service)
+for svc in "${SERVICES[@]}"; do
+  if systemctl list-unit-files | grep -q "^${svc}"; then
+    sudo systemctl enable "$svc" || echo "Warning: could not enable $svc"
+  fi
+done
+
+# 7) Open firewall (UFW) port 9392 if UFW is present
+step "7) Open firewall port 9392 (if UFW present)"
+if command -v ufw >/dev/null 2>&1; then
+  if ufw status | grep -qi "inactive"; then
+    echo "UFW inactive — skipping UFW rules"
+  else
+    sudo ufw allow 9392/tcp || echo "Warning: ufw allow failed"
+  fi
+else
+  echo "UFW not installed — skipping firewall changes (you may need to open port 9392 manually)."
+fi
+
+# 8) Start/Restart GVM services (tolerant)
+step "8) Start GVM services"
+sudo systemctl daemon-reload || true
+sudo systemctl restart gvmd || true
+sudo systemctl restart gsad || true
+# try gvm-start (this starts all parts)
+if command -v gvm-start >/dev/null 2>&1; then
+  sudo gvm-start || echo "gvm-start returned non-zero (check services manually)."
+else
+  echo "gvm-start not found — services may already be running or managed by systemd."
+fi
+
+# 9) Feed syncs (run as _gvm). This may take a long time (minutes to hours).
+step "9) Synchronize feeds (GVMD_DATA, SCAP, CERT) — this may take long"
+# run as _gvm user; some setups require runuser -u _gvm --
+if sudo runuser -u _gvm -- greenbone-feed-sync --type GVMD_DATA; then
+  echo "GVMD_DATA sync OK"
+else
+  echo "GVMD_DATA sync returned non-zero (check network and logs)"
+fi
+
+sudo runuser -u _gvm -- greenbone-feed-sync --type SCAP || echo "SCAP sync issue"
+sudo runuser -u _gvm -- greenbone-feed-sync --type CERT || echo "CERT sync issue"
+
+# Rebuild/refresh gvmd feed data
+echo "Rebuilding GVMD DB and updating manager data..."
+sudo runuser -u _gvm -- gvmd --rebuild || echo "gvmd --rebuild returned non-zero (might be normal on some versions)"
+
+# Try gvm-feed-update if available
+if command -v gvm-feed-update >/dev/null 2>&1; then
+  sudo gvm-feed-update || true
+fi
+
+# Run a final gvm-check-setup (do not abort on non-zero)
+echo "Running gvm-check-setup (may print warnings)."
+sudo gvm-check-setup || echo "gvm-check-setup printed issues — inspect output above and $LOG"
+
+# 10) Final restart to ensure everything is loaded
+step "10) Final restart of GVM services"
+sudo gvm-stop || true
+sleep 3
+sudo gvm-start || true
+sleep 5
+
+# Determine server IP (first non-loopback IPv4)
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{for(i=1;i<=NF;i++){ if ($i !~ /^127\\./) { print $i; exit } }}' || true)
 if [ -z "$SERVER_IP" ]; then
-    # fallback to ip route method
-    SERVER_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/ {print $7; exit}' || true)
+  SERVER_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '/src/ {print $7; exit}' || true)
 fi
 if [ -z "$SERVER_IP" ]; then
-    SERVER_IP="127.0.0.1"
+  SERVER_IP="127.0.0.1"
 fi
 
+# Summarize and write summary file
+step "Finished — writing summary"
+cat > "$SUMMARY" <<EOF
+OpenVAS (Greenbone CE) installation summary - ${TIMESTAMP}
+
+Access:
+  URL: https://${SERVER_IP}:9392
+  Username: admin
+  Password: ${ADMIN_PASS:-(not detected)}
+
+Logs:
+  Installer log: ${LOG}
+  gvm-setup captured output: ${SETUP_OUT}
+
+Notes:
+ - Feed synchronization commands were executed. Full feed sync can take a long time (minutes to hours)
+   depending on your internet and CPU. Check Administration -> Feed Status in the web UI.
+ - If you cannot reach https://${SERVER_IP}:9392:
+     * Confirm gsad is listening: sudo ss -ltnp | grep 9392
+     * Confirm firewall allows 9392
+     * Confirm ExecStart path inside the gsad systemd unit is correct
+ - To manually reset the admin password:
+     sudo runuser -u _gvm -- gvmd --user=admin --new-password='YourNewPasswordHere'
+EOF
+
+chmod 600 "$SUMMARY"
+echo "Summary saved to $SUMMARY"
+
+# Print final info to user
 echo
 echo "============================================================"
-echo "✅ OpenVAS (Greenbone CE) Installation finished."
+echo "Installation completed (check above for warnings)."
 echo
-echo "Access the web interface at:"
-echo "    https://$SERVER_IP:9392"
+echo "Web UI: https://${SERVER_IP}:9392"
+echo "Username: admin"
+echo "Password: ${ADMIN_PASS:-(not detected)}"
 echo
-echo "Login credentials:"
-echo "    Username: admin"
-if [ -n "${ADMIN_PASS:-}" ]; then
-    echo "    Password: $ADMIN_PASS"
-else
-    echo "    Password: (not detected) — check $SETUP_OUT or the gvm-setup output above"
-fi
+echo "A summary was written to: $SUMMARY"
+echo "Installer log: $LOG"
+echo "Setup capture: $SETUP_OUT"
 echo
-echo "Notes:"
-echo " - Services enabled to start on boot (if service units existed): ${SERVICES_TO_ENABLE[*]}"
-echo " - If you prefer port 443 (system HTTPS), you must update gsad.service and ensure you have valid TLS certs and root privileges."
-echo " - Feed sync may take time; to update feeds manually run:"
-echo "       sudo greenbone-feed-sync --type GVMD_DATA"
-echo " - Logs and setup output:"
-echo "       Installer log: $LOG"
-echo "       gvm-setup capture: $SETUP_OUT"
+echo "Feed sync may still be in progress — wait until 'Feed Status' shows 'Current' in the UI before running scans."
+echo "If you see 'default Scan Config is not available' in the UI, it means feed sync hasn't finished yet."
 echo "============================================================"
 
 exit 0
