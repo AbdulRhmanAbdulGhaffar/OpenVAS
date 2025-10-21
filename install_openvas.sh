@@ -1,179 +1,107 @@
-#!/usr/bin/env bash
-# -*- coding: utf-8 -*-
-# Install & configure Greenbone Community Edition (GVM / OpenVAS) on Kali Linux
-# Author: Generated for AbdulRhman AbdulGhaffar
-# Usage: sudo bash install_gvm.sh [--remote] [--port PORT] [--non-interactive]
-# Example: sudo bash install_gvm.sh --remote --port 443 --non-interactive
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
+#!/bin/bash
 
-LOGFILE="/var/log/gvm_install.log"
-CRED_FILE="/root/gvm_admin_credentials.txt"
-GSAD_SERVICE="/usr/lib/systemd/system/gsad.service"  # location used in guide, may vary
-REMOTE_ACCESS=false
-REMOTE_PORT=9392
-NON_INTERACTIVE=false
+# GVM (Greenbone Vulnerability Manager) Professional Installer for Kali Linux
+# This script automates the installation and configuration process.
+#
+# What it does:
+# 1. Checks for root privileges.
+# 2. Updates and upgrades the system.
+# 3. Installs the GVM package.
+# 4. Runs the initial gvm-setup.
+# 5. Configures the web interface (GSA) to be accessible from any IP address.
+# 6. Sets the admin user's password to 'admin'.
+# 7. Enables GVM services to start automatically on boot.
+# 8. Verifies the installation.
 
-# Helper: log
-log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"
-}
+# --- Color Codes for Output ---
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
-# Parse args (simple)
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --remote) REMOTE_ACCESS=true; shift ;;
-    --port) REMOTE_PORT="$2"; shift 2 ;;
-    --non-interactive) NON_INTERACTIVE=true; shift ;;
-    -h|--help) echo "Usage: sudo bash install_gvm.sh [--remote] [--port PORT] [--non-interactive]"; exit 0 ;;
-    *) echo "Unknown arg: $1"; exit 1 ;;
-  esac
-done
+# --- Step 1: Check for Root Privileges ---
+echo -e "${GREEN}[*] Checking for root privileges...${NC}"
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}[!] Error: This script must be run as root. Please use 'sudo ./install_gvm.sh'.${NC}"
+  exit 1
+fi
+echo -e "${GREEN}[+] Privileges check passed.${NC}\n"
 
-check_root() {
-  if [[ $(id -u) -ne 0 ]]; then
-    echo "Please run as root (sudo)." >&2
+# --- Step 2: Update System ---
+echo -e "${GREEN}[*] Updating package lists and performing a full system upgrade...${NC}"
+apt update && apt full-upgrade -y
+if [ $? -ne 0 ]; then
+    echo -e "${RED}[!] Error: Failed to update the system. Please check your network connection and repositories.${NC}"
     exit 1
-  fi
-}
+fi
+echo -e "${GREEN}[+] System updated successfully.${NC}\n"
 
-safe_write_creds() {
-  local user=$1
-  local pass=$2
-  umask 177
-  cat > "$CRED_FILE" <<EOF
-GVM admin credentials (created on $(date -u +"%Y-%m-%d %H:%M:%S UTC"))
+# --- Step 3: Install GVM ---
+echo -e "${GREEN}[*] Installing Greenbone Vulnerability Manager (gvm)...${NC}"
+apt install gvm -y
+if [ $? -ne 0 ]; then
+    echo -e "${RED}[!] Error: Failed to install GVM package.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}[+] GVM package installed successfully.${NC}\n"
 
-Username: $user
-Password: $pass
+# --- Step 4: Initial GVM Setup ---
+echo -e "${YELLOW}[*] Running initial GVM setup. This process will take a considerable amount of time to sync the feeds...${NC}"
+gvm-setup
+if [ $? -ne 0 ]; then
+    echo -e "${RED}[!] Error: gvm-setup failed. Please check the output for errors.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}[+] Initial GVM setup completed.${NC}\n"
 
-File location: $CRED_FILE
-EOF
-  chmod 600 "$CRED_FILE"
-  log "Admin credentials saved to $CRED_FILE (permissions 600)"
-}
+# --- Step 5: Configure Remote Access ---
+GSA_SERVICE_FILE="/usr/lib/systemd/system/gsad.service"
+echo -e "${GREEN}[*] Configuring Greenbone Security Assistant (GSA) for remote access...${NC}"
+if [ -f "$GSA_SERVICE_FILE" ]; then
+    sed -i 's/--listen=127.0.0.1/--listen=0.0.0.0/' "$GSA_SERVICE_FILE"
+    echo -e "${GREEN}[+] GSA configured to listen on all interfaces (0.0.0.0).${NC}\n"
+else
+    echo -e "${RED}[!] Error: GSA service file not found at $GSA_SERVICE_FILE. Cannot configure remote access.${NC}"
+fi
 
-generate_password() {
-  # 16-char random password
-  tr -dc 'A-Za-z0-9!@%_-+=' < /dev/urandom | head -c 16 || echo "GvmPassw0rd!"
-}
+# --- Step 6: Set Admin Password ---
+echo -e "${YELLOW}[*] Setting the 'admin' user password to 'admin'...${NC}"
+# The command must be run as the _gvm user to have permissions
+sudo -u _gvm gvmd --user=admin --new-password=admin
+if [ $? -ne 0 ]; then
+    echo -e "${RED}[!] Error: Failed to set the admin password. The user may not exist yet.${NC}"
+    echo -e "${YELLOW}[*] Note: The password can be set manually later.${NC}"
+fi
+echo -e "${GREEN}[+] Admin password has been set.${NC}\n"
 
-update_system() {
-  log "Updating APT and upgrading packages..."
-  apt update >> "$LOGFILE" 2>&1
-  apt -y upgrade >> "$LOGFILE" 2>&1 || log "Upgrade returned non-zero (check $LOGFILE)"
-}
+# --- Step 7: Enable and Start Services on Boot ---
+echo -e "${GREEN}[*] Reloading systemd, enabling and starting GVM services...${NC}"
+systemctl daemon-reload
+systemctl enable gvmd ospd-openvas gsad
+systemctl restart gvmd ospd-openvas gsad
+echo -e "${GREEN}[+] GVM services have been enabled and started.${NC}\n"
 
-install_gvm_package() {
-  log "Installing gvm package (OpenVAS/GVM)..."
-  apt -y install gvm >> "$LOGFILE" 2>&1
-}
+# --- Step 8: Verify Installation ---
+echo -e "${YELLOW}[*] Running gvm-check-setup to verify the installation. Please review the output carefully.${NC}"
+gvm-check-setup
+echo -e "${GREEN}[+] Verification script finished.${NC}\n"
 
-run_gvm_setup() {
-  log "Running gvm-setup (this may take several minutes). Output is logged to $LOGFILE"
-  if $NON_INTERACTIVE ; then
-    # Try to run with yes pipe; note gvm-setup may require TTY for some prompts
-    yes "" | gvm-setup >> "$LOGFILE" 2>&1 || log "gvm-setup exited with non-zero (check $LOGFILE)"
-  else
-    gvm-setup | tee -a "$LOGFILE"
-  fi
-  # Attempt to parse credentials from the log (common pattern)
-  if grep -q -i "Admin user created" "$LOGFILE" 2>/dev/null || grep -q -i "created user" "$LOGFILE" 2>/dev/null; then
-    # try to extract lines containing "user" and "password" near each other
-    creds=$(grep -iE "admin|user|password" "$LOGFILE" -n | tail -n 30 || true)
-    log "Attempting to extract admin credentials from gvm-setup output..."
-    echo "$creds" | tee -a "$LOGFILE"
-    # best-effort parse: look for "username" and "password" words
-    user=$(echo "$creds" | grep -iE "username|user" | head -n1 | awk -F: '{print $2}' | tr -d ' ' || true)
-    pass=$(echo "$creds" | grep -iE "password" | head -n1 | awk -F: '{print $2}' | tr -d ' ' || true)
-    if [[ -n "$user" && -n "$pass" ]]; then
-      safe_write_creds "$user" "$pass"
-      return 0
-    fi
-  fi
-  return 1
-}
-
-ensure_admin_user() {
-  # If we couldn't grab credentials, create a new admin user for GVM
-  local user_check
-  user_check=$(runuser -u _gvm -- gvmd --get-users 2>/dev/null || true)
-  if echo "$user_check" | grep -q -i "admin"; then
-    log "Admin user already exists. Listing users:"
-    echo "$user_check" | tee -a "$LOGFILE"
-    return 0
-  fi
-  NEW_ADMIN="admin"
-  NEW_PASS=$(generate_password)
-  log "Creating admin user '$NEW_ADMIN' with a generated password."
-  runuser -u _gvm -- gvmd --create-user="$NEW_ADMIN" --password="$NEW_PASS" >> "$LOGFILE" 2>&1
-  safe_write_creds "$NEW_ADMIN" "$NEW_PASS"
-}
-
-sync_feeds() {
-  log "Syncing Greenbone feeds (this can take a long time depending on network & CPU)"
-  greenbone-feed-sync --type GVMD_DATA >> "$LOGFILE" 2>&1 || log "GVMD_DATA sync failed"
-  greenbone-feed-sync --type SCAP >> "$LOGFILE" 2>&1 || log "SCAP sync failed"
-  greenbone-feed-sync --type CERT >> "$LOGFILE" 2>&1 || log "CERT sync failed"
-  log "Feed sync commands finished. Check $LOGFILE for details."
-}
-
-configure_gsad_remote() {
-  if [[ ! -f "$GSAD_SERVICE" ]]; then
-    log "Warning: gsad service file not found at $GSAD_SERVICE. Trying common alternative locations..."
-    if [[ -f "/lib/systemd/system/gsad.service" ]]; then
-      GSAD_SERVICE="/lib/systemd/system/gsad.service"
-    elif [[ -f "/etc/systemd/system/gsad.service" ]]; then
-      GSAD_SERVICE="/etc/systemd/system/gsad.service"
-    else
-      log "gsad.service location not found. Skipping automatic remote configure. You can edit the service file manually."
-      return 1
-    fi
-  fi
-  log "Backing up original gsad.service to ${GSAD_SERVICE}.bak"
-  cp "$GSAD_SERVICE" "${GSAD_SERVICE}.bak"
-  log "Modifying gsad ExecStart to listen on 0.0.0.0 port ${REMOTE_PORT}"
-  # Replace listen argument while preserving other flags
-  sed -i -E "s@(ExecStart=.*--listen=)[^ ]+@\\10.0.0.0@" "$GSAD_SERVICE" || true
-  # Change port value if present; otherwise append --port
-  if grep -q -- "--port=" "$GSAD_SERVICE"; then
-    sed -i -E "s@(--port=)[0-9]+@\\1${REMOTE_PORT}@" "$GSAD_SERVICE" || true
-  else
-    # append port to ExecStart line
-    sed -i -E "s@(ExecStart=.*)@\\1 --port=${REMOTE_PORT}@" "$GSAD_SERVICE" || true
-  fi
-  systemctl daemon-reload
-  systemctl restart gsad || log "Failed to restart gsad; check $LOGFILE and 'journalctl -u gsad -b'"
-  log "gsad service modified and restarted (if restart succeeded)."
-}
-
-final_checks() {
-  log "Running gvm-check-setup to verify installation; output appended to $LOGFILE"
-  gvm-check-setup >> "$LOGFILE" 2>&1 || log "gvm-check-setup returned non-zero; inspect $LOGFILE"
-  log "Installation script finished. Admin credentials (if created) are in $CRED_FILE"
-  log "Tip: Open the web UI at https://<SERVER-IP>:${REMOTE_PORT} (or https://127.0.0.1:${REMOTE_PORT} if local)"
-}
-
-main() {
-  check_root
-  log "Start GVM install script"
-  update_system
-  install_gvm_package
-
-  if run_gvm_setup ; then
-    log "gvm-setup appears to have produced credentials (saved)."
-  else
-    log "gvm-setup did not yield parseable credentials. Will ensure admin user exists."
-    ensure_admin_user
-  fi
-
-  sync_feeds
-
-  if $REMOTE_ACCESS ; then
-    configure_gsad_remote || log "configure_gsad_remote failed or was skipped"
-  fi
-
-  final_checks
-}
-
-main "$@"
+# --- Final Instructions ---
+IP_ADDR=$(hostname -I | awk '{print $1}')
+echo -e "${GREEN}====================================================${NC}"
+echo -e "${GREEN}      GVM Installation & Configuration Complete!      ${NC}"
+echo -e "${GREEN}====================================================${NC}"
+echo -e "\n"
+echo -e "You can now access the Greenbone web interface at:"
+echo -e "URL:      ${YELLOW}https://${IP_ADDR}:9392${NC}"
+echo -e "\n"
+echo -e "Credentials:"
+echo -e "Username: ${YELLOW}admin${NC}"
+echo -e "Password: ${YELLOW}admin${NC}"
+echo -e "\n"
+echo -e "${RED}[!] SECURITY WARNING:${NC}"
+echo -e "${YELLOW}The password 'admin' is highly insecure. It is STRONGLY recommended to change it immediately after your first login for security purposes.${NC}"
+echo -e "\n"
+echo -e "It may take some time for the feeds to fully sync. You can check the status in the web UI under 'Administration' -> 'Feed Status'."
+echo -e "If you encounter issues, run 'sudo gvm-check-setup' again for diagnostics."
+echo -e "\n"
