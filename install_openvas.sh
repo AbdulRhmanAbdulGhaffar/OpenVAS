@@ -12,7 +12,7 @@
 #              4. Opens the default port (9392) in the UFW firewall.
 #
 # Author: Gemini
-# Version: 2.3 (Explicit PostgreSQL version install)
+# Version: 2.4 (Added pre-emptive cleanup step)
 # =============================================================================
 
 # --- Color Definitions ---
@@ -25,6 +25,7 @@ NC='\033[0m' # No Color
 main() {
     check_root
     prepare_system
+    cleanup_previous_installations
     install_gvm
     ensure_postgres_running
     configure_gvm
@@ -49,16 +50,34 @@ check_root() {
 
 # --- Prepare System ---
 prepare_system() {
-    echo -e "${GREEN}==> [Step 1/10] Performing a full system upgrade...${NC}"
+    echo -e "${GREEN}==> [Step 1/11] Performing a full system upgrade...${NC}"
     echo -e "${YELLOW}This process may take a while.${NC}"
     apt update
     apt full-upgrade -y
     echo -e "${GREEN}System updated successfully.${NC}"
 }
 
+# --- Cleanup Previous Installations ---
+cleanup_previous_installations() {
+    echo -e "\n${GREEN}==> [Step 2/11] Cleaning up previous GVM and PostgreSQL installations...${NC}"
+    # Stop services to release file locks, ignore errors if they don't exist
+    systemctl stop gsad.service gvmd.service ospd-openvas.service notus-scanner.service postgresql.service || true
+    
+    # Purge packages to remove configs
+    echo -e "${YELLOW}Removing packages...${NC}"
+    apt purge --auto-remove gvm postgresql* -y
+    
+    # Remove old data directories to ensure a completely fresh start
+    echo -e "${YELLOW}Removing old data directories...${NC}"
+    rm -rf /var/lib/gvm /var/log/gvm /var/run/gvm
+    rm -rf /var/lib/postgresql/16
+    
+    echo -e "${GREEN}Cleanup complete.${NC}"
+}
+
 # --- Install GVM ---
 install_gvm() {
-    echo -e "\n${GREEN}==> [Step 2/10] Installing GVM and PostgreSQL packages...${NC}"
+    echo -e "\n${GREEN}==> [Step 3/11] Installing GVM and PostgreSQL packages...${NC}"
     # Explicitly install the specific PostgreSQL version and common files
     # to prevent issues with missing binaries like 'initdb'.
     apt install gvm postgresql-16 postgresql-client-16 postgresql-common -y
@@ -67,7 +86,7 @@ install_gvm() {
 
 # --- Ensure PostgreSQL is Initialized and Running ---
 ensure_postgres_running() {
-    echo -e "\n${GREEN}==> [Step 3/10] Preparing PostgreSQL database...${NC}"
+    echo -e "\n${GREEN}==> [Step 4/11] Preparing PostgreSQL database...${NC}"
     # Ensure the service is enabled and started
     systemctl enable postgresql.service
     systemctl start postgresql.service
@@ -96,7 +115,7 @@ ensure_postgres_running() {
 
 # --- Initial GVM Configuration ---
 configure_gvm() {
-    echo -e "\n${GREEN}==> [Step 4/10] Running initial GVM setup...${NC}"
+    echo -e "\n${GREEN}==> [Step 5/11] Running initial GVM setup...${NC}"
     echo -e "${YELLOW}This process syncs the feeds and can take a very long time. Please be patient.${NC}"
     # Now run gvm-setup, which should find a working PostgreSQL instance
     gvm-setup
@@ -105,7 +124,7 @@ configure_gvm() {
 
 # --- Configure Remote Access ---
 configure_remote_access() {
-    echo -e "\n${GREEN}==> [Step 5/10] Configuring remote access...${NC}"
+    echo -e "\n${GREEN}==> [Step 6/11] Configuring remote access...${NC}"
     local gsad_service_file="/usr/lib/systemd/system/gsad.service"
     if [ -f "$gsad_service_file" ]; then
         # Change listen address from localhost to any
@@ -119,7 +138,7 @@ configure_remote_access() {
 
 # --- Increase GVMD Service Timeout ---
 increase_service_timeout() {
-    echo -e "\n${GREEN}==> [Step 6/10] Increasing gvmd service startup timeout...${NC}"
+    echo -e "\n${GREEN}==> [Step 7/11] Increasing gvmd service startup timeout...${NC}"
     local override_dir="/etc/systemd/system/gvmd.service.d"
     mkdir -p "$override_dir"
     cat > "${override_dir}/override.conf" << EOF
@@ -133,12 +152,12 @@ EOF
 
 # --- Enable and Restart Services (Robust Method) ---
 enable_and_restart_services() {
-    echo -e "\n${GREEN}==> [Step 7/10] Enabling GVM services for autostart...${NC}"
+    echo -e "\n${GREEN}==> [Step 8/11] Enabling GVM services for autostart...${NC}"
     systemctl daemon-reload # Reload after creating timeout override
     systemctl enable gsad.service gvmd.service ospd-openvas.service notus-scanner.service
     echo -e "${GREEN}Services enabled successfully.${NC}"
 
-    echo -e "\n${GREEN}==> [Step 8/10] Migrating database and restarting GVM services...${NC}"
+    echo -e "\n${GREEN}==> [Step 9/11] Migrating database and restarting GVM services...${NC}"
     
     # Stop all services to ensure a clean start
     echo -e "${YELLOW}Stopping all GVM services...${NC}"
@@ -184,7 +203,7 @@ enable_and_restart_services() {
 
 # --- Set Static Password for Admin User ---
 set_static_credentials() {
-    echo -e "\n${GREEN}==> [Step 9/10] Setting a static password for the 'admin' user...${NC}"
+    echo -e "\n${GREEN}==> [Step 10/11] Setting a static password for the 'admin' user...${NC}"
     # This is run after services have been restarted to ensure gvmd is responsive.
     runuser -u _gvm -- gvmd --user=admin --new-password=admin
     echo -e "${GREEN}Password successfully set to 'admin'.${NC}"
@@ -192,7 +211,7 @@ set_static_credentials() {
 
 # --- Configure Firewall ---
 configure_firewall() {
-    echo -e "\n${GREEN}==> [Step 10/10] Configuring the firewall (UFW)...${NC}"
+    echo -e "\n${GREEN}==> [Step 11/11] Configuring the firewall (UFW)...${NC}"
     # Install UFW if it's not already installed
     if ! command -v ufw &> /dev/null; then
         echo -e "${YELLOW}UFW is not installed. Installing...${NC}"
