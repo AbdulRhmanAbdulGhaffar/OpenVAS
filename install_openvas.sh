@@ -12,7 +12,7 @@
 #              4. Opens the default port (9392) in the UFW firewall.
 #
 # Author: Gemini
-# Version: 2.1 (Added timeout override and DB migration)
+# Version: 2.2 (Added robust PostgreSQL pre-start)
 # =============================================================================
 
 # --- Color Definitions ---
@@ -26,6 +26,7 @@ main() {
     check_root
     prepare_system
     install_gvm
+    ensure_postgres_running
     configure_gvm
     configure_remote_access
     increase_service_timeout
@@ -48,7 +49,7 @@ check_root() {
 
 # --- Prepare System ---
 prepare_system() {
-    echo -e "${GREEN}==> [Step 1/9] Performing a full system upgrade...${NC}"
+    echo -e "${GREEN}==> [Step 1/10] Performing a full system upgrade...${NC}"
     echo -e "${YELLOW}This process may take a while.${NC}"
     apt update
     apt full-upgrade -y
@@ -57,22 +58,53 @@ prepare_system() {
 
 # --- Install GVM ---
 install_gvm() {
-    echo -e "\n${GREEN}==> [Step 2/9] Installing GVM packages...${NC}"
-    apt install gvm -y
-    echo -e "${GREEN}GVM installed successfully.${NC}"
+    echo -e "\n${GREEN}==> [Step 2/10] Installing GVM packages...${NC}"
+    # Installing postgresql explicitly to ensure it's managed first
+    apt install gvm postgresql -y
+    echo -e "${GREEN}GVM and PostgreSQL packages installed successfully.${NC}"
 }
+
+# --- Ensure PostgreSQL is Initialized and Running ---
+ensure_postgres_running() {
+    echo -e "\n${GREEN}==> [Step 3/10] Preparing PostgreSQL database...${NC}"
+    # Ensure the service is enabled and started
+    systemctl enable postgresql.service
+    systemctl start postgresql.service
+
+    # On some fresh systems, the cluster needs to be created
+    # We check for the existence of the main config file
+    if [ ! -f /etc/postgresql/16/main/postgresql.conf ]; then
+        echo -e "${YELLOW}PostgreSQL cluster not found. Initializing new cluster...${NC}"
+        pg_createcluster 16 main --start
+        echo -e "${GREEN}Cluster created and started.${NC}"
+    fi
+    
+    # Wait for a few seconds to ensure the socket is available
+    echo -e "${YELLOW}Waiting for PostgreSQL to become fully active...${NC}"
+    sleep 5
+    
+    # Final check
+    if ! systemctl is-active --quiet postgresql.service; then
+        echo -e "${RED}Error: PostgreSQL service failed to start!${NC}"
+        echo -e "${YELLOW}Please check with 'systemctl status postgresql.service'${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}PostgreSQL is running successfully.${NC}"
+}
+
 
 # --- Initial GVM Configuration ---
 configure_gvm() {
-    echo -e "\n${GREEN}==> [Step 3/9] Running initial GVM setup...${NC}"
+    echo -e "\n${GREEN}==> [Step 4/10] Running initial GVM setup...${NC}"
     echo -e "${YELLOW}This process syncs the feeds and can take a very long time. Please be patient.${NC}"
+    # Now run gvm-setup, which should find a working PostgreSQL instance
     gvm-setup
     echo -e "${GREEN}Initial setup completed.${NC}"
 }
 
 # --- Configure Remote Access ---
 configure_remote_access() {
-    echo -e "\n${GREEN}==> [Step 4/9] Configuring remote access...${NC}"
+    echo -e "\n${GREEN}==> [Step 5/10] Configuring remote access...${NC}"
     local gsad_service_file="/usr/lib/systemd/system/gsad.service"
     if [ -f "$gsad_service_file" ]; then
         # Change listen address from localhost to any
@@ -86,7 +118,7 @@ configure_remote_access() {
 
 # --- Increase GVMD Service Timeout ---
 increase_service_timeout() {
-    echo -e "\n${GREEN}==> [Step 5/9] Increasing gvmd service startup timeout...${NC}"
+    echo -e "\n${GREEN}==> [Step 6/10] Increasing gvmd service startup timeout...${NC}"
     local override_dir="/etc/systemd/system/gvmd.service.d"
     mkdir -p "$override_dir"
     cat > "${override_dir}/override.conf" << EOF
@@ -100,12 +132,12 @@ EOF
 
 # --- Enable and Restart Services (Robust Method) ---
 enable_and_restart_services() {
-    echo -e "\n${GREEN}==> [Step 6/9] Enabling services for autostart...${NC}"
+    echo -e "\n${GREEN}==> [Step 7/10] Enabling GVM services for autostart...${NC}"
     systemctl daemon-reload # Reload after creating timeout override
     systemctl enable gsad.service gvmd.service ospd-openvas.service notus-scanner.service
     echo -e "${GREEN}Services enabled successfully.${NC}"
 
-    echo -e "\n${GREEN}==> [Step 7/9] Migrating database and restarting services...${NC}"
+    echo -e "\n${GREEN}==> [Step 8/10] Migrating database and restarting GVM services...${NC}"
     
     # Stop all services to ensure a clean start
     echo -e "${YELLOW}Stopping all GVM services...${NC}"
@@ -151,7 +183,7 @@ enable_and_restart_services() {
 
 # --- Set Static Password for Admin User ---
 set_static_credentials() {
-    echo -e "\n${GREEN}==> [Step 8/9] Setting a static password for the 'admin' user...${NC}"
+    echo -e "\n${GREEN}==> [Step 9/10] Setting a static password for the 'admin' user...${NC}"
     # This is run after services have been restarted to ensure gvmd is responsive.
     runuser -u _gvm -- gvmd --user=admin --new-password=admin
     echo -e "${GREEN}Password successfully set to 'admin'.${NC}"
@@ -159,7 +191,7 @@ set_static_credentials() {
 
 # --- Configure Firewall ---
 configure_firewall() {
-    echo -e "\n${GREEN}==> [Step 9/9] Configuring the firewall (UFW)...${NC}"
+    echo -e "\n${GREEN}==> [Step 10/10] Configuring the firewall (UFW)...${NC}"
     # Install UFW if it's not already installed
     if ! command -v ufw &> /dev/null; then
         echo -e "${YELLOW}UFW is not installed. Installing...${NC}"
