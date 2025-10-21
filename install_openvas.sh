@@ -31,8 +31,6 @@ step() { echo; echo "---- $1"; echo; }
 # 1) Update & upgrade system
 step "1) Update & upgrade system"
 apt update -y && apt full-upgrade -y
-apt autoremove -y
-
 # 2) Install gvm
 step "2) Install gvm (Greenbone Community Edition)"
 apt install -y gvm
