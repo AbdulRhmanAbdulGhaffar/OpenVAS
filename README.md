@@ -46,6 +46,10 @@ Install OpenVAS and all its dependencies:
 ```bash
 sudo apt install gvm -y
 ```
+---
+```bash
+sudo apt install openvas -y
+```
 
 > This command automatically installs **Greenbone Vulnerability Manager (GVM)** and all required components.
 
