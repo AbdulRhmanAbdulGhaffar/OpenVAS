@@ -255,7 +255,7 @@ This project follows the **MIT License** — free to use, modify, and distribute
 
 ## 👤 Author
 **AbdulRhman AbdulGhaffar**  
-Cybersecurity Enthusiast & Vulnerability Management Specialist  
+Cybersecurity Consultant  & Incident Response Specialist 
 
 ---
 
