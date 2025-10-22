@@ -190,9 +190,11 @@ sudo runuser -u _gvm -- gvmd --user=admin --new-password=YourNewPassword123
 
 Force a feed update manually:
 ```bash
-sudo greenbone-feed-sync --type GVMD_DATA
-sudo greenbone-feed-sync --type SCAP
-sudo greenbone-feed-sync --type CERT
+sudo runuser -u _gvm -- greenbone-feed-sync --type GVMD_DATA
+sudo runuser -u _gvm -- greenbone-feed-sync --type SCAP
+sudo runuser -u _gvm -- greenbone-feed-sync --type CERT
+sudo gvm-check-setup
+
 ```
 
 Restart services after update:
